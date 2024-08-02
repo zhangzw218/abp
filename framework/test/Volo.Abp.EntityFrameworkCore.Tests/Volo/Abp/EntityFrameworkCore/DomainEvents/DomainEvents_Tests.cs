@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 using Volo.Abp.Domain.Entities.Events;
@@ -25,12 +27,14 @@ public class AbpEntityChangeOptions_DomainEvents_Tests : AbpEntityChangeOptions_
 public class AbpEfCoreDomainEvents_Tests : EntityFrameworkCoreTestBase
 {
     protected readonly IRepository<AppEntityWithNavigations, Guid> AppEntityWithNavigationsRepository;
+    protected readonly IRepository<Product, Guid> ProductRepository;
     protected readonly ILocalEventBus LocalEventBus;
     protected readonly IRepository<Person, Guid> PersonRepository;
     protected bool _loadEntityWithDetails = false;
 
     public AbpEfCoreDomainEvents_Tests()
     {
+        ProductRepository = GetRequiredService<IRepository<Product, Guid>>();
         AppEntityWithNavigationsRepository = GetRequiredService<IRepository<AppEntityWithNavigations, Guid>>();
         LocalEventBus = GetRequiredService<ILocalEventBus>();
         PersonRepository = GetRequiredService<IRepository<Person, Guid>>();
@@ -348,6 +352,55 @@ public class AbpEfCoreDomainEvents_Tests : EntityFrameworkCoreTestBase
                 entity.OneToMany.ShouldNotBeNull();
 
                 entity.OneToMany.Clear();
+                await AppEntityWithNavigationsRepository.UpdateAsync(entity);
+
+                await uow.CompleteAsync();
+            }
+        }
+
+        entityUpdatedEventTriggered.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Should_Trigger_Domain_Events_For_Aggregate_Root_When_OneToOne_Null_Changes_Tests()
+    {
+        _loadEntityWithDetails = true;
+
+        var entityId = Guid.NewGuid();
+
+        await AppEntityWithNavigationsRepository.InsertAsync(new AppEntityWithNavigations(entityId, "TestEntity")
+        {
+            OneToOne = new AppEntityWithNavigationChildOneToOne
+            {
+                ChildName = "ChildName1"
+            }
+        });
+        var productId = Guid.NewGuid();
+        await ProductRepository.InsertAsync(new Product(productId, "Tem", 0));
+
+        var entityUpdatedEventTriggered = false;
+
+        LocalEventBus.Subscribe<EntityUpdatedEventData<AppEntityWithNavigations>>(data =>
+        {
+            entityUpdatedEventTriggered = !entityUpdatedEventTriggered;
+            return Task.CompletedTask;
+        });
+
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var uowManager = scope.ServiceProvider.GetRequiredService<IUnitOfWorkManager>();
+            using (var uow = uowManager.Begin())
+            {
+                var entity2 = await ProductRepository.GetAsync(productId);
+                // await ProductRepository.DeleteAsync(entity2, true); //If the Product is deleted before the AppEntityWithNavigations query, the unit test works
+                var entity = await (await AppEntityWithNavigationsRepository.GetQueryableAsync())
+                    .Where(s => s.Id == entityId)
+                    .Include(s => s.OneToOne)
+                    .SingleOrDefaultAsync();
+                // await ProductRepository.DeleteAsync(entity2); //If you change autoSave to false, the unit test works
+                await ProductRepository.DeleteAsync(entity2, true); //Only here will the unit test fail
+                entity.OneToOne = null;
+
                 await AppEntityWithNavigationsRepository.UpdateAsync(entity);
 
                 await uow.CompleteAsync();
